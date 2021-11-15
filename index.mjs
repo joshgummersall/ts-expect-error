@@ -65,12 +65,13 @@ const writeFileLines = async (
 
 const lines = await readFileLines(errorFilePath);
 
-// Reduce into valid entries
+// Reduce into valid entries based on regexp match
 const errors = lines.reduce((acc, line) => {
   const { groups } =
     /^(?<filePath>[^(]+)\((?<lineNum>\d+),(?<colNum>\d+)\):\serror\s(?<errorCode>TS\d+)\:\s(?<errorText>.*)$/g.exec(
       line
     ) ?? {};
+
   if (!groups) return acc;
 
   const { filePath, errorText } = groups;
@@ -80,32 +81,38 @@ const errors = lines.reduce((acc, line) => {
   return [...acc, { errorText, filePath, lineNum }];
 }, []);
 
-// Group errors by filepath so we can mutate a single file at a time
-const grouped = (size ? sample(errors, size) : errors).reduce((acc, error) => {
-  if (!acc[error.filePath]) acc[error.filePath] = [];
-  acc[error.filePath].push(error);
-  return acc;
-}, {});
+// Group errors by filepath so we can mutate a single file at a time later on.
+const grouped = (size ? sample(errors, size) : errors).reduce(
+  (acc, { filePath, ...error }) => {
+    if (!acc[filePath]) acc[filePath] = [];
+    acc[filePath].push(error);
+    return acc;
+  },
+  {}
+);
 
-// Iterate over all the groups and sort in reverse order. This allows us to insert lines
-// without affecting earlier line numbers.
+// Grouping errors targeting the same line number for later formatting.
+// Then, sort by reverse line number (to insert without affecting earlier lines).
 const sorted = Object.entries(grouped).map(([filePath, errors]) => [
   filePath,
-  errors.sort((left, right) => right.lineNum - left.lineNum),
+  Object.entries(
+    errors.reduce((acc, { lineNum, errorText }) => {
+      if (!acc[lineNum]) acc[lineNum] = [];
+      acc[lineNum].push(errorText);
+      return acc;
+    }, {})
+  )
+    .map(([lineNum, errors]) => [parseInt(lineNum, 10), errors])
+    .sort(([left], [right]) => right - left),
 ]);
 
 // Run the operations in series so we don't produce too many iops.
 await sorted.reduce(
-  (acc, [filePath, errors]) =>
+  (acc, [filePath, lines]) =>
     acc.then(async () => {
       const fileLines = await readFileLines(filePath);
 
-      errors.forEach(({ errorText, lineNum }) => {
-        const expectErrors = [
-          `// ${errorText}`,
-          `// ${tsExpectError} ${todoPrefix}: fix error and remove`,
-        ];
-
+      lines.forEach(([lineNum, errors]) => {
         // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
         // This index will be used when operating on the file lines.
         const zeroIndexLineNum = lineNum - 1;
@@ -125,9 +132,10 @@ await sorted.reduce(
         }
 
         // Helper function to generate new line number
-        const newLines = expectErrors.map(
-          (expectError) => `${" ".repeat(offset)}${expectError}`
-        );
+        const newLines = [
+          ...errors,
+          `${tsExpectError} ${todoPrefix}: fix error and remove`,
+        ].map((text) => `${" ".repeat(offset)}// ${text}`);
 
         // Print a pseudo-diff representation of what we would be doing.
         if (dryRun) {
