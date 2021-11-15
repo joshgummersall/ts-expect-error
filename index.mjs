@@ -9,9 +9,6 @@ const size = argv.sample ? parseInt(argv.sample, 10) : undefined;
 
 const tsExpectError = "@ts-expect-error";
 
-const tscErrorRegex =
-  /^(?<filePath>[^ ]+)\((?<lineNum>\d+),(?<colNum>\d+)\): error (?<errorCode>TS\d+)\:\s(?<errorText>.*)$/g;
-
 const log = (operation) => [
   (...args) =>
     verbose
@@ -70,14 +67,17 @@ const lines = await readFileLines(errorFilePath);
 
 // Reduce into valid entries
 const errors = lines.reduce((acc, line) => {
-  const { groups } = tscErrorRegex.exec(line) ?? {};
+  const { groups } =
+    /^(?<filePath>[^(]+)\((?<lineNum>\d+),(?<colNum>\d+)\):\serror\s(?<errorCode>TS\d+)\:\s(?<errorText>.*)$/g.exec(
+      line
+    ) ?? {};
   if (!groups) return acc;
 
   const { filePath, errorText } = groups;
   const lineNum = parseInt(groups.lineNum, 10);
   if (Number.isNaN(lineNum)) return acc;
 
-  return [...acc, { errorText,  filePath, lineNum }];
+  return [...acc, { errorText, filePath, lineNum }];
 }, []);
 
 // Group errors by filepath so we can mutate a single file at a time
@@ -101,7 +101,10 @@ await sorted.reduce(
       const fileLines = await readFileLines(filePath);
 
       errors.forEach(({ errorText, lineNum }) => {
-        const expectErrors = [`// ${todoPrefix}: ${errorText}`, `// ${tsExpectError}`];
+        const expectErrors = [
+          `// ${errorText}`,
+          `// ${tsExpectError} ${todoPrefix}: fix error and remove`,
+        ];
 
         // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
         // This index will be used when operating on the file lines.
@@ -122,12 +125,16 @@ await sorted.reduce(
         }
 
         // Helper function to generate new line number
-        const newLines = expectErrors.map(expectError => `${" ".repeat(offset)}${expectError}`);
+        const newLines = expectErrors.map(
+          (expectError) => `${" ".repeat(offset)}${expectError}`
+        );
 
         // Print a pseudo-diff representation of what we would be doing.
         if (dryRun) {
           console.log(filePath);
-          newLines.forEach((newLine, idx) => console.log(chalk.green(`${lineNum + idx}: ${newLine}`)));
+          newLines.forEach((newLine, idx) =>
+            console.log(chalk.green(`${lineNum + idx}: ${newLine}`))
+          );
           console.log(`${lineNum + newLines.length}: ${currentLine}\n`);
           return;
         }
