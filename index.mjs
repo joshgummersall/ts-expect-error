@@ -2,20 +2,39 @@ const {
   _: [, errorFilePath],
   dry: dryRun = false,
   todo: todoPrefix = "TODO",
-  verbose = false
+  verbose = false,
 } = argv;
+
+const size = argv.sample ? parseInt(argv.sample, 10) : undefined;
 
 const tsExpectError = "@ts-expect-error";
 
 const tscErrorRegex =
-  /^(?<filePath>[^ ]+)\((?<line>\d+),(?<col>\d+)\): error (?<errorCode>TS\d+)\:.*/g;
+  /^(?<filePath>[^ ]+)\((?<lineNum>\d+),(?<colNum>\d+)\): error (?<errorCode>TS\d+)\:.*/g;
 
 const log = (operation) => [
   (...args) =>
-    verbose ? console.log(`[INFO] ${operation}...${chalk.green("SUCCESS!")}`, ...args) : null,
+    verbose
+      ? console.log(`[INFO] ${operation}...${chalk.green("SUCCESS!")}`, ...args)
+      : null,
   (...args) =>
     console.log(`[INFO] ${operation}...${chalk.red("FAILED!")}`, ...args),
 ];
+
+const sample = (items, n) => {
+  const selected = [],
+    indices = new Set();
+
+  while (indices.size < n) {
+    const index = Math.floor(Math.random() * items.length);
+    if (!indices.has(index)) {
+      selected.push(items[index]);
+      indices.add(index);
+    }
+  }
+
+  return selected;
+};
 
 const readFileLines = async (path, { delim = "\n", enc = "utf8" } = {}) => {
   const [success, failed] = log(`Reading ${path}`);
@@ -47,24 +66,24 @@ const writeFileLines = async (
   }
 };
 
-const errorLines = await readFileLines(errorFilePath);
+const lines = await readFileLines(errorFilePath);
 
-// Group errors by filepath so we can mutate a single file at a time
-const grouped = errorLines.reduce((acc, errorLine) => {
-  const { groups } = tscErrorRegex.exec(errorLine) ?? {};
+// Reduce into valid entries
+const errors = lines.reduce((acc, line) => {
+  const { groups } = tscErrorRegex.exec(line) ?? {};
   if (!groups) return acc;
 
-  const { filePath, line, errorCode } = groups;
-
-  const lineNum = parseInt(line, 10);
+  const { filePath, errorCode } = groups;
+  const lineNum = parseInt(groups.lineNum, 10);
   if (Number.isNaN(lineNum)) return acc;
 
-  // Initialize entries to empty array
-  if (!acc[filePath]) acc[filePath] = [];
+  return [...acc, { errorCode, filePath, lineNum }];
+}, []);
 
-  // Now, collect errors.
-  acc[filePath].push(lineNum);
-
+// Group errors by filepath so we can mutate a single file at a time
+const grouped = (size ? sample(errors, size) : errors).reduce((acc, error) => {
+  if (!acc[error.filePath]) acc[error.filePath] = [];
+  acc[error.filePath].push(error);
   return acc;
 }, {});
 
@@ -81,8 +100,8 @@ await sorted.reduce(
     acc.then(async () => {
       const fileLines = await readFileLines(filePath);
 
-      errors.forEach((lineNum) => {
-        const expectErrorText = `// ${tsExpectError} ${todoPrefix}: fix strict mode violation and remove`;
+      errors.forEach(({ errorCode, lineNum }) => {
+        const expectErrorText = `// ${tsExpectError} ${todoPrefix}: fix ${errorCode} violation and remove`;
 
         // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
         // This index will be used when operating on the file lines.
@@ -103,7 +122,7 @@ await sorted.reduce(
         }
 
         // Helper function to generate new line number
-        const newLine = `${" ".repeat(offset)}${expectErrorText};`;
+        const newLine = `${" ".repeat(offset)}${expectErrorText}`;
 
         // Print a pseudo-diff representation of what we would be doing.
         if (dryRun) {
