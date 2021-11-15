@@ -10,7 +10,7 @@ const size = argv.sample ? parseInt(argv.sample, 10) : undefined;
 const tsExpectError = "@ts-expect-error";
 
 const tscErrorRegex =
-  /^(?<filePath>[^ ]+)\((?<lineNum>\d+),(?<colNum>\d+)\): error (?<errorCode>TS\d+)\:.*/g;
+  /^(?<filePath>[^ ]+)\((?<lineNum>\d+),(?<colNum>\d+)\): error (?<errorCode>TS\d+)\:\s(?<errorText>.*)$/g;
 
 const log = (operation) => [
   (...args) =>
@@ -73,11 +73,11 @@ const errors = lines.reduce((acc, line) => {
   const { groups } = tscErrorRegex.exec(line) ?? {};
   if (!groups) return acc;
 
-  const { filePath, errorCode } = groups;
+  const { filePath, errorText } = groups;
   const lineNum = parseInt(groups.lineNum, 10);
   if (Number.isNaN(lineNum)) return acc;
 
-  return [...acc, { errorCode, filePath, lineNum }];
+  return [...acc, { errorText,  filePath, lineNum }];
 }, []);
 
 // Group errors by filepath so we can mutate a single file at a time
@@ -100,8 +100,8 @@ await sorted.reduce(
     acc.then(async () => {
       const fileLines = await readFileLines(filePath);
 
-      errors.forEach(({ errorCode, lineNum }) => {
-        const expectErrorText = `// ${tsExpectError} ${todoPrefix}: fix ${errorCode} violation and remove`;
+      errors.forEach(({ errorText, lineNum }) => {
+        const expectErrors = [`// ${todoPrefix}: ${errorText}`, `// ${tsExpectError}`];
 
         // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
         // This index will be used when operating on the file lines.
@@ -122,19 +122,19 @@ await sorted.reduce(
         }
 
         // Helper function to generate new line number
-        const newLine = `${" ".repeat(offset)}${expectErrorText}`;
+        const newLines = expectErrors.map(expectError => `${" ".repeat(offset)}${expectError}`);
 
         // Print a pseudo-diff representation of what we would be doing.
         if (dryRun) {
           console.log(filePath);
-          console.log(chalk.green(`${lineNum}: ${newLine}`));
-          console.log(`${lineNum + 1}: ${currentLine}\n`);
+          newLines.forEach((newLine, idx) => console.log(chalk.green(`${lineNum + idx}: ${newLine}`)));
+          console.log(`${lineNum + newLines.length}: ${currentLine}\n`);
           return;
         }
 
         // Insert a new line above the error, ignoring it and recording relevant metadata for later
         // reconciliation.
-        fileLines.splice(zeroIndexLineNum, 0, newLine);
+        fileLines.splice(zeroIndexLineNum, 0, ...newLines);
       });
 
       // All set - write the file and move on.
