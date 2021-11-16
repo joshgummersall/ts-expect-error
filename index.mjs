@@ -1,19 +1,23 @@
 const {
   _: [, errorFilePath],
-  dry: dryRun = false,
+  dry = false,
   todo: todoPrefix = "TODO",
   verbose = false,
 } = argv;
 
+const context = argv.context ? parseInt(argv.context, 10) : 5;
 const size = argv.sample ? parseInt(argv.sample, 10) : undefined;
 
 const tsExpectError = "@ts-expect-error";
 
+const jsComment = (comment) => `// ${comment}`;
+const jsxComment = (comment) => `{/* ${comment} */}`;
+const skipComment = () => null;
+
 const log = (operation) => [
-  (...args) =>
-    verbose
-      ? console.log(`[INFO] ${operation}...${chalk.green("SUCCESS!")}`, ...args)
-      : null,
+  () => {
+    // no-op
+  },
   (...args) =>
     console.log(`[INFO] ${operation}...${chalk.red("FAILED!")}`, ...args),
 ];
@@ -107,53 +111,127 @@ const sorted = Object.entries(grouped).map(([filePath, errors]) => [
 ]);
 
 // Run the operations in series so we don't produce too many iops.
-await sorted.reduce(
-  (acc, [filePath, lines]) =>
-    acc.then(async () => {
-      const fileLines = await readFileLines(filePath);
+await sorted.reduce(async (previous, [filePath, lines], idx) => {
+  await previous;
 
-      lines.forEach(([lineNum, errors]) => {
-        // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
-        // This index will be used when operating on the file lines.
-        const zeroIndexLineNum = lineNum - 1;
+  const fileLines = await readFileLines(filePath);
 
-        const currentLine = fileLines[zeroIndexLineNum];
-        const previousLine = fileLines[zeroIndexLineNum - 1];
+  await lines.reduce(async (previous, [lineNum, errors]) => {
+    await previous;
 
-        // If the previous line already has expect-error text, skip this write.
-        if (previousLine.includes(tsExpectError)) {
-          return;
-        }
+    // `tsc` reports error line numbers where the first line is #1, but arrays are zero-indexed.
+    // This index will be used when operating on the file lines.
+    const zeroIndexLineNum = lineNum - 1;
 
-        // Calculate the initial line offset so we correctly align comments.
-        let offset = 0;
-        while (offset < currentLine.length && currentLine[offset] === " ") {
-          offset++;
-        }
+    const currentLine = fileLines[zeroIndexLineNum];
+    const previousLine = fileLines[zeroIndexLineNum - 1];
 
-        // Helper function to generate new line number
-        const newLines = [
-          ...errors,
-          `${tsExpectError} ${todoPrefix}: fix error and remove`,
-        ].map((text) => `${" ".repeat(offset)}// ${text}`);
+    // If the previous line already has expect-error text, skip this write.
+    if (previousLine.includes(tsExpectError)) {
+      return;
+    }
 
-        // Print a pseudo-diff representation of what we would be doing.
-        if (dryRun) {
-          console.log(filePath);
-          newLines.forEach((newLine, idx) =>
-            console.log(chalk.green(`${lineNum + idx}: ${newLine}`))
-          );
-          console.log(`${lineNum + newLines.length}: ${currentLine}\n`);
-          return;
-        }
+    // Calculate the initial line offset so we correctly align comments.
+    let offset = 0;
+    while (offset < currentLine.length && currentLine[offset] === " ") {
+      offset++;
+    }
 
-        // Insert a new line above the error, ignoring it and recording relevant metadata for later
-        // reconciliation.
-        fileLines.splice(zeroIndexLineNum, 0, ...newLines);
-      });
+    // Try to determine if we're in JSX context
+    const contextLines = fileLines.slice(
+      zeroIndexLineNum - context,
+      zeroIndexLineNum + context
+    );
 
-      // All set - write the file and move on.
-      await writeFileLines(filePath, fileLines);
-    }),
-  Promise.resolve()
-);
+    // Helper function to return correct comment formatter, maybe based on user input/context
+    const formatter = async () => {
+      if (!filePath.endsWith(".tsx") && !filePath.endsWith(".jsx")) {
+        return jsComment;
+      }
+
+      // Heh.
+      if (
+        !contextLines.some((line) =>
+          /(([^\w]<\w+)|(\/>)|(<\/)|(={))/.test(line)
+        )
+      ) {
+        return jsComment;
+      }
+
+      console.log(`${chalk.magenta("File:")} ${filePath}`);
+
+      console.log(
+        `${chalk.cyan("Status:")} ${sorted.length - idx - 1} files remaining`
+      );
+      console.log();
+
+      console.log(chalk.red("Errors:"));
+      errors.forEach((error) => console.log(` - ${error}`));
+      console.log();
+
+      console.log(chalk.yellow("Context:"));
+      console.log(
+        contextLines
+          .map((line, idx) =>
+            idx === context ? ` > ${chalk.yellow(line)}` : ` > ${line}`
+          )
+          .join("\n")
+      );
+      console.log();
+
+      const answer = (
+        await question(`${chalk.blue("Format:")} type anything for JSX... `)
+      )
+        ?.toLowerCase()
+        ?.trim();
+
+      console.log();
+
+      switch (answer) {
+        case "":
+          return jsComment;
+        case "skip":
+          return skipComment;
+        default:
+          return jsxComment;
+      }
+    };
+
+    // Format helper for jsx-aware comments
+    const format = await formatter();
+
+    // Helper function to generate new line number
+    const newLines = [
+      ...errors,
+      `${tsExpectError} ${todoPrefix}: fix error and remove`,
+    ]
+      .map((comment) => {
+        const formatted = format(comment);
+        if (!formatted) return;
+
+        return `${" ".repeat(offset)}${formatted}`;
+      })
+      .filter(Boolean);
+
+    // Early return if we shold skip!
+    if (!newLines.length) return;
+
+    // Print a pseudo-diff representation of what we would be doing.
+    if (verbose) {
+      console.log(chalk.magenta(filePath));
+      newLines.forEach((newLine, idx) =>
+        console.log(` ${lineNum + idx}: ${chalk.green(newLine)}`)
+      );
+      console.log(
+        ` ${lineNum + newLines.length}: ${chalk.yellow(currentLine)}\n`
+      );
+    }
+
+    // Insert a new line above the error, ignoring it and recording relevant metadata for later
+    // reconciliation.
+    if (!dry) fileLines.splice(zeroIndexLineNum, 0, ...newLines);
+  }, Promise.resolve());
+
+  // All set - write the file and move on.
+  await writeFileLines(filePath, fileLines);
+}, Promise.resolve());
