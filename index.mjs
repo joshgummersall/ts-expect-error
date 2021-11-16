@@ -131,17 +131,16 @@ await sorted.reduce(async (previous, [filePath, lines], idx) => {
       return;
     }
 
+    const contextLines = fileLines.slice(
+      zeroIndexLineNum - context,
+      zeroIndexLineNum + context
+    );
+
     // Calculate the initial line offset so we correctly align comments.
     let offset = 0;
     while (offset < currentLine.length && currentLine[offset] === " ") {
       offset++;
     }
-
-    // Try to determine if we're in JSX context
-    const contextLines = fileLines.slice(
-      zeroIndexLineNum - context,
-      zeroIndexLineNum + context
-    );
 
     // Helper function to return correct comment formatter, maybe based on user input/context
     const formatter = async () => {
@@ -149,12 +148,41 @@ await sorted.reduce(async (previous, [filePath, lines], idx) => {
         return jsComment;
       }
 
-      // Heh.
+      // Optimizations!
+      if (
+        currentLine.includes("return ") ||
+        currentLine.endsWith(";") ||
+        /^\s*const \w+\s?=/.test(currentLine)
+      ) {
+        return jsComment;
+      }
+
+      // Heh. Try to match jsx?
       if (
         !contextLines.some((line) =>
           /(([^\w]<\w+)|(\/>)|(<\/)|(={))/.test(line)
         )
       ) {
+        return jsComment;
+      }
+
+      // function () {}
+      if (/^\s*function\s?\w*\(.*{/.test(currentLine)) {
+        return jsComment;
+      }
+
+      // prop={something} is js
+      if (/^\s*\w+={([^}]+})?/.test(currentLine)) {
+        return jsComment;
+      }
+
+      // key: value
+      if (/^\s*\w+:\s?.*/.test(currentLine)) {
+        return jsComment;
+      }
+
+      // case foo:
+      if (/^\s*case\s.+:/.test(currentLine)) {
         return jsComment;
       }
 
